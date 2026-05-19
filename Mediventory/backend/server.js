@@ -136,6 +136,14 @@ app.use(express.json({ limit: "1mb" }));
 app.use(morgan("dev"));
 app.use(express.static(PUBLIC_DIR));
 
+app.get("/api/health", (req, res) => {
+  res.json({
+    ok: true,
+    database: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+    uptime: process.uptime()
+  });
+});
+
 function publicId(doc) {
   if (!doc) return doc;
   const obj = typeof doc.toObject === "function" ? doc.toObject() : doc;

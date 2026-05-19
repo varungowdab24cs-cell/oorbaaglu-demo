@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Medicine Inventory Management System frontend and backend demo",
   "main": "backend/server.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node backend/server.js",
     "seed": "node backend/server.js --seed-only",
