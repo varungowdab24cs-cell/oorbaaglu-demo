@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: mediventory
+    runtime: node
+    rootDir: Mediventory
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        sync: false
