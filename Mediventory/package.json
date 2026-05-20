@@ -9,6 +9,7 @@
   "scripts": {
     "start": "node backend/server.js",
     "seed": "node backend/server.js --seed-only",
+    "populate": "node backend/populate.js",
     "dev": "node backend/server.js"
   },
   "dependencies": {
