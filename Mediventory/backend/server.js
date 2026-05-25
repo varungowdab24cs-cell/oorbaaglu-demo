@@ -150,6 +150,13 @@ function publicId(doc) {
   return { ...obj, id: String(obj._id), _id: undefined };
 }
 
+function safeUser(user) {
+  const row = publicId(user);
+  if (!row) return row;
+  delete row.passwordHash;
+  return row;
+}
+
 function publicRows(rows) {
   return rows.map(publicId);
 }
@@ -447,6 +454,39 @@ app.post("/api/medicines", requirePermission("inventory:write"), async (req, res
   }
 });
 
+app.put("/api/medicines/:id", requirePermission("inventory:write"), async (req, res, next) => {
+  try {
+    const error = required(req.body, ["name", "genericName", "categoryId", "dosageForm", "strength", "mrp", "purchasePrice"]);
+    if (error) return res.status(400).json({ error });
+    const medicine = await Medicine.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    if (!medicine) return res.status(404).json({ error: "Medicine not found" });
+    await audit(req.user, "medicine:update", medicine.name);
+    res.json(publicId(medicine));
+  } catch (error) {
+    if (error.code === 11000) return res.status(409).json({ error: "Duplicate medicine entry" });
+    next(error);
+  }
+});
+
+app.delete("/api/medicines/:id", requirePermission("inventory:write"), async (req, res, next) => {
+  try {
+    const medicine = await Medicine.findById(req.params.id);
+    if (!medicine) return res.status(404).json({ error: "Medicine not found" });
+    const inventoryCount = await Inventory.countDocuments({ medicineId: medicine._id });
+    if (inventoryCount > 0) {
+      medicine.active = false;
+      await medicine.save();
+      await audit(req.user, "medicine:deactivate", medicine.name);
+      return res.json({ ...publicId(medicine), deactivated: true });
+    }
+    await Medicine.deleteOne({ _id: medicine._id });
+    await audit(req.user, "medicine:delete", medicine.name);
+    return res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/inventory", async (req, res, next) => {
   try {
     res.json(await inventoryRows());
@@ -465,6 +505,36 @@ app.post("/api/inventory", requirePermission("inventory:write"), async (req, res
     res.status(201).json(publicId(batch));
   } catch (error) {
     if (error.code === 11000) return res.status(409).json({ error: "Duplicate batch number for this location" });
+    next(error);
+  }
+});
+
+app.put("/api/inventory/:id", requirePermission("inventory:write"), async (req, res, next) => {
+  try {
+    const error = required(req.body, ["medicineId", "batchNumber", "locationId", "quantity", "expiryDate"]);
+    if (error) return res.status(400).json({ error });
+    if (Number(req.body.quantity) < 0) return res.status(400).json({ error: "Negative stock is not allowed" });
+    const batch = await Inventory.findByIdAndUpdate(
+      req.params.id,
+      { ...req.body, quantity: Number(req.body.quantity) },
+      { new: true, runValidators: true }
+    );
+    if (!batch) return res.status(404).json({ error: "Inventory batch not found" });
+    await audit(req.user, "inventory:update", `${batch.batchNumber} updated`);
+    res.json(publicId(batch));
+  } catch (error) {
+    if (error.code === 11000) return res.status(409).json({ error: "Duplicate batch number for this location" });
+    next(error);
+  }
+});
+
+app.delete("/api/inventory/:id", requirePermission("inventory:write"), async (req, res, next) => {
+  try {
+    const batch = await Inventory.findByIdAndDelete(req.params.id);
+    if (!batch) return res.status(404).json({ error: "Inventory batch not found" });
+    await audit(req.user, "inventory:delete", `${batch.batchNumber} deleted`);
+    res.json({ ok: true });
+  } catch (error) {
     next(error);
   }
 });
@@ -528,6 +598,65 @@ app.post("/api/suppliers", requirePermission("supplier:write"), async (req, res,
     const supplier = await Supplier.create({ active: true, rating: 0, ...req.body });
     await audit(req.user, "supplier:create", supplier.name);
     res.status(201).json(publicId(supplier));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/users", requirePermission("user:write"), async (req, res, next) => {
+  try {
+    const users = await User.find().sort("name");
+    res.json(users.map(safeUser));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/users", requirePermission("user:write"), async (req, res, next) => {
+  try {
+    const error = required(req.body, ["name", "email", "role", "password"]);
+    if (error) return res.status(400).json({ error });
+    const passwordHash = await bcrypt.hash(req.body.password, 12);
+    const user = await User.create({
+      name: req.body.name,
+      email: String(req.body.email).toLowerCase(),
+      role: req.body.role,
+      passwordHash,
+      active: req.body.active !== false
+    });
+    await audit(req.user, "user:create", user.email);
+    res.status(201).json(safeUser(user));
+  } catch (error) {
+    if (error.code === 11000) return res.status(409).json({ error: "Duplicate user" });
+    next(error);
+  }
+});
+
+app.put("/api/users/:id", requirePermission("user:write"), async (req, res, next) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (req.body.name !== undefined) user.name = req.body.name;
+    if (req.body.email !== undefined) user.email = String(req.body.email).toLowerCase();
+    if (req.body.role !== undefined) user.role = req.body.role;
+    if (req.body.active !== undefined) user.active = Boolean(req.body.active);
+    if (req.body.password) user.passwordHash = await bcrypt.hash(req.body.password, 12);
+    await user.save();
+    await audit(req.user, "user:update", user.email);
+    res.json(safeUser(user));
+  } catch (error) {
+    if (error.code === 11000) return res.status(409).json({ error: "Duplicate user" });
+    next(error);
+  }
+});
+
+app.delete("/api/users/:id", requirePermission("user:write"), async (req, res, next) => {
+  try {
+    if (req.user?.sub === req.params.id) return res.status(400).json({ error: "You cannot deactivate yourself" });
+    const user = await User.findByIdAndUpdate(req.params.id, { active: false }, { new: true });
+    if (!user) return res.status(404).json({ error: "User not found" });
+    await audit(req.user, "user:deactivate", user.email);
+    res.json(safeUser(user));
   } catch (error) {
     next(error);
   }

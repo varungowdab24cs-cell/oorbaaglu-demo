@@ -3,7 +3,8 @@ const state = {
   user: JSON.parse(localStorage.getItem("mims_user") || "null"),
   view: "dashboard",
   meta: { categories: [], locations: [] },
-  cache: {}
+  cache: {},
+  editing: { medicineId: null, inventoryId: null, userId: null }
 };
 
 const views = [
@@ -13,6 +14,7 @@ const views = [
   ["sales", "Sales"],
   ["procurement", "Procurement"],
   ["suppliers", "Suppliers"],
+  ["users", "Users"],
   ["reports", "Reports"],
   ["audit", "Audit"]
 ];
@@ -37,6 +39,10 @@ async function api(path, options = {}) {
     }
   });
   const data = await response.json().catch(() => ({}));
+  if (response.status === 401 && path !== "/api/auth/login") {
+    logout();
+    throw new Error("Session expired. Please log in again.");
+  }
   if (!response.ok) throw new Error(data.error || "Request failed");
   return data;
 }
@@ -52,6 +58,9 @@ function setMessage(target, text, type = "success") {
 
 function render() {
   if (!state.token || !state.user) return renderLogin();
+  const visibleViews = state.user?.role === "Admin"
+    ? views
+    : views.filter(([key]) => key !== "users");
   app.innerHTML = html`
     <div class="shell">
       <aside class="sidebar">
@@ -67,7 +76,7 @@ function render() {
           <span>Mediventory</span>
         </div>
         <nav class="nav">
-          ${views.map(([key, label]) => `<button class="${state.view === key ? "active" : ""}" data-view="${key}">${label}</button>`).join("")}
+          ${visibleViews.map(([key, label]) => `<button class="${state.view === key ? "active" : ""}" data-view="${key}">${label}</button>`).join("")}
         </nav>
         <div class="userbox">
           <strong>${state.user.name}</strong>
@@ -155,18 +164,19 @@ async function loadMeta() {
 }
 
 async function loadView() {
-  await loadMeta();
   const content = document.querySelector("#content");
   content.classList.remove("is-ready");
   content.classList.add("is-loading");
   content.innerHTML = `<div class="notice">Loading ${state.view}...</div>`;
   try {
+    await loadMeta();
     if (state.view === "dashboard") return renderDashboard(await api("/api/dashboard"));
     if (state.view === "medicines") return renderMedicines(await api("/api/medicines"));
     if (state.view === "inventory") return renderInventory(await api("/api/inventory"));
     if (state.view === "sales") return renderSales(await api("/api/sales"));
     if (state.view === "procurement") return renderProcurement(await api("/api/purchases"));
     if (state.view === "suppliers") return renderSuppliers(await api("/api/suppliers"));
+    if (state.view === "users") return renderUsers(await api("/api/users"));
     if (state.view === "reports") return renderReports(await api("/api/reports"));
     if (state.view === "audit") return renderAudit(await api("/api/audit"));
   } catch (error) {
@@ -241,6 +251,8 @@ function renderDashboard(data) {
 }
 
 function renderMedicines(rows) {
+  state.cache.medicines = rows;
+  const editing = state.editing.medicineId;
   document.querySelector("#content").innerHTML = html`
     <section class="card">
       <div class="section-head">
@@ -259,7 +271,10 @@ function renderMedicines(rows) {
         <label>Purchase price <input name="purchasePrice" type="number" min="0" required /></label>
         <label>Reorder level <input name="reorderLevel" type="number" min="0" value="10" /></label>
         <label>Manufacturer <input name="manufacturer" /></label>
-        <div class="full"><button>Add medicine</button></div>
+        <div class="full">
+          <button>${editing ? "Update medicine" : "Add medicine"}</button>
+          ${editing ? "<button type=\"button\" class=\"secondary\" id=\"medicineCancel\">Cancel</button>" : ""}
+        </div>
       </form>
       ${medicineTable(rows)}
     </section>
@@ -267,14 +282,64 @@ function renderMedicines(rows) {
   document.querySelector("#medicineSearch").addEventListener("input", async event => {
     renderMedicines(await api(`/api/medicines?q=${encodeURIComponent(event.target.value)}`));
   });
-  document.querySelector("#medicineForm").addEventListener("submit", submitJson("/api/medicines", "#medicineMessage"));
+  document.querySelector("#medicineForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const body = Object.fromEntries(new FormData(event.target).entries());
+    coerceNumbers(body, ["mrp", "purchasePrice", "reorderLevel"]);
+    const path = editing ? `/api/medicines/${editing}` : "/api/medicines";
+    const method = editing ? "PUT" : "POST";
+    try {
+      await api(path, { method, body: JSON.stringify(body) });
+      setMessage("#medicineMessage", editing ? "Medicine updated." : "Medicine added.");
+      state.editing.medicineId = null;
+      event.target.reset();
+      setTimeout(loadView, 500);
+    } catch (error) {
+      setMessage("#medicineMessage", error.message, "error");
+    }
+  });
+  const medicineTableNode = document.querySelector("#medicineTable");
+  if (medicineTableNode) {
+    medicineTableNode.addEventListener("click", async event => {
+      const action = event.target?.dataset?.action;
+      const id = event.target?.dataset?.id;
+      if (!action || !id) return;
+      if (action === "edit-medicine") {
+        state.editing.medicineId = id;
+        renderMedicines(state.cache.medicines);
+        return;
+      }
+      if (action === "delete-medicine") {
+        if (!confirm("Deactivate this medicine? Existing inventory will keep working.")) return;
+        try {
+          await api(`/api/medicines/${id}`, { method: "DELETE" });
+          setMessage("#medicineMessage", "Medicine deactivated.");
+          state.editing.medicineId = null;
+          setTimeout(loadView, 500);
+        } catch (error) {
+          setMessage("#medicineMessage", error.message, "error");
+        }
+      }
+    });
+  }
+  if (editing) {
+    const current = rows.find(row => row.id === editing);
+    if (current) fillMedicineForm(current);
+  }
+  const cancel = document.querySelector("#medicineCancel");
+  if (cancel) {
+    cancel.addEventListener("click", () => {
+      state.editing.medicineId = null;
+      renderMedicines(state.cache.medicines);
+    });
+  }
   finishViewTransition();
 }
 
 function medicineTable(rows) {
   return html`
-    <table>
-      <thead><tr><th>Name</th><th>Category</th><th>Form</th><th>Stock</th><th>MRP</th><th>Status</th></tr></thead>
+    <table id="medicineTable">
+      <thead><tr><th>Name</th><th>Category</th><th>Form</th><th>Stock</th><th>MRP</th><th>Status</th><th class="actions">Actions</th></tr></thead>
       <tbody>
         ${rows.map(row => html`
           <tr>
@@ -284,6 +349,12 @@ function medicineTable(rows) {
             <td>${row.stock}</td>
             <td>${money(row.mrp)}</td>
             <td><span class="pill ${row.active ? "good" : "danger"}">${row.active ? "Active" : "Inactive"}</span></td>
+            <td class="actions">
+              <div class="row-actions">
+                <button class="secondary" data-action="edit-medicine" data-id="${row.id}">Edit</button>
+                <button class="danger" data-action="delete-medicine" data-id="${row.id}">Delete</button>
+              </div>
+            </td>
           </tr>`).join("")}
       </tbody>
     </table>
@@ -291,24 +362,12 @@ function medicineTable(rows) {
 }
 
 function renderInventory(rows) {
+  state.cache.inventory = rows;
+  const editing = state.editing.inventoryId;
   document.querySelector("#content").innerHTML = html`
     <section class="grid split">
       <div class="card">
-        <div class="section-head"><h2>Batch inventory</h2><span class="pill">${rows.length} batches</span></div>
-        <table>
-          <thead><tr><th>Medicine</th><th>Batch</th><th>Location</th><th>Qty</th><th>Expiry</th><th>Alert</th></tr></thead>
-          <tbody>
-            ${rows.map(row => {
-              const days = (new Date(row.expiryDate) - new Date()) / 86400000;
-              const cls = days < 0 ? "danger" : days <= 60 ? "warn" : "good";
-              const label = days < 0 ? "Expired" : days <= 60 ? "Near expiry" : "OK";
-              return `<tr><td>${row.medicine?.name || "-"}</td><td>${row.batchNumber}</td><td>${row.location?.name || "-"}</td><td>${row.quantity}</td><td>${date(row.expiryDate)}</td><td><span class="pill ${cls}">${label}</span></td></tr>`;
-            }).join("")}
-          </tbody>
-        </table>
-      </div>
-      <div class="card">
-        <div class="section-head"><h2>Add batch</h2></div>
+        <div class="section-head"><h2>${editing ? "Update batch" : "Add batch"}</h2></div>
         <div id="inventoryMessage"></div>
         <form id="inventoryForm" class="form-grid">
           <label class="full">Medicine <select name="medicineId" id="inventoryMedicine"></select></label>
@@ -316,13 +375,78 @@ function renderInventory(rows) {
           <label>Location <select name="locationId">${options(state.meta.locations)}</select></label>
           <label>Quantity <input name="quantity" type="number" min="0" required /></label>
           <label>Expiry <input name="expiryDate" type="date" required /></label>
-          <div class="full"><button>Add inventory</button></div>
+          <div class="full">
+            <button>${editing ? "Update batch" : "Add inventory"}</button>
+            ${editing ? "<button type=\"button\" class=\"secondary\" id=\"inventoryCancel\">Cancel</button>" : ""}
+          </div>
         </form>
+      </div>
+      <div class="card">
+        <div class="section-head"><h2>Batch inventory</h2><span class="pill">${rows.length} batches</span></div>
+        <table>
+          <thead><tr><th>Medicine</th><th>Batch</th><th>Location</th><th>Qty</th><th>Expiry</th><th>Alert</th><th class="actions">Actions</th></tr></thead>
+          <tbody>
+            ${rows.map(row => {
+              const days = (new Date(row.expiryDate) - new Date()) / 86400000;
+              const cls = days < 0 ? "danger" : days <= 60 ? "warn" : "good";
+              const label = days < 0 ? "Expired" : days <= 60 ? "Near expiry" : "OK";
+              return `<tr><td>${row.medicine?.name || "-"}</td><td>${row.batchNumber}</td><td>${row.location?.name || "-"}</td><td>${row.quantity}</td><td>${date(row.expiryDate)}</td><td><span class="pill ${cls}">${label}</span></td><td class="actions"><div class="row-actions"><button class="secondary" data-action="edit-inventory" data-id="${row.id}">Edit</button><button class="danger" data-action="delete-inventory" data-id="${row.id}">Delete</button></div></td></tr>`;
+            }).join("")}
+          </tbody>
+        </table>
       </div>
     </section>
   `;
-  fillMedicineSelect("#inventoryMedicine");
-  document.querySelector("#inventoryForm").addEventListener("submit", submitJson("/api/inventory", "#inventoryMessage"));
+  const inventoryRow = editing ? rows.find(row => row.id === editing) : null;
+  fillMedicineSelect("#inventoryMedicine", inventoryRow?.medicineId || inventoryRow?.medicine?.id || "");
+  document.querySelector("#inventoryForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const body = Object.fromEntries(new FormData(event.target).entries());
+    coerceNumbers(body, ["quantity"]);
+    const path = editing ? `/api/inventory/${editing}` : "/api/inventory";
+    const method = editing ? "PUT" : "POST";
+    try {
+      await api(path, { method, body: JSON.stringify(body) });
+      setMessage("#inventoryMessage", editing ? "Batch updated." : "Batch added.");
+      state.editing.inventoryId = null;
+      event.target.reset();
+      setTimeout(loadView, 500);
+    } catch (error) {
+      setMessage("#inventoryMessage", error.message, "error");
+    }
+  });
+  const inventoryTable = document.querySelector("#content table");
+  if (inventoryTable) {
+    inventoryTable.addEventListener("click", async event => {
+      const action = event.target?.dataset?.action;
+      const id = event.target?.dataset?.id;
+      if (!action || !id) return;
+      if (action === "edit-inventory") {
+        state.editing.inventoryId = id;
+        renderInventory(state.cache.inventory);
+        return;
+      }
+      if (action === "delete-inventory") {
+        if (!confirm("Delete this batch?")) return;
+        try {
+          await api(`/api/inventory/${id}`, { method: "DELETE" });
+          setMessage("#inventoryMessage", "Batch deleted.");
+          state.editing.inventoryId = null;
+          setTimeout(loadView, 500);
+        } catch (error) {
+          setMessage("#inventoryMessage", error.message, "error");
+        }
+      }
+    });
+  }
+  if (editing && inventoryRow) fillInventoryForm(inventoryRow);
+  const inventoryCancel = document.querySelector("#inventoryCancel");
+  if (inventoryCancel) {
+    inventoryCancel.addEventListener("click", () => {
+      state.editing.inventoryId = null;
+      renderInventory(state.cache.inventory);
+    });
+  }
   finishViewTransition();
 }
 
@@ -451,6 +575,116 @@ function renderSuppliers(rows) {
   finishViewTransition();
 }
 
+function renderUsers(rows) {
+  if (state.user?.role !== "Admin") {
+    document.querySelector("#content").innerHTML = html`
+      <section class="card"><div class="notice error">Admin access required.</div></section>
+    `;
+    finishViewTransition();
+    return;
+  }
+  state.cache.users = rows;
+  const editing = state.editing.userId;
+  document.querySelector("#content").innerHTML = html`
+    <section class="grid split">
+      <div class="card">
+        <div class="section-head"><h2>Users</h2><span class="pill">${rows.length} accounts</span></div>
+        <table id="usersTable">
+          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th class="actions">Actions</th></tr></thead>
+          <tbody>
+            ${rows.map(row => `
+              <tr>
+                <td>${row.name}</td>
+                <td>${row.email}</td>
+                <td>${row.role}</td>
+                <td><span class="pill ${row.active ? "good" : "danger"}">${row.active ? "Active" : "Inactive"}</span></td>
+                <td class="actions">
+                  <div class="row-actions">
+                    <button class="secondary" data-action="edit-user" data-id="${row.id}">Edit</button>
+                    <button class="danger" data-action="delete-user" data-id="${row.id}">Delete</button>
+                  </div>
+                </td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="section-head"><h2>${editing ? "Update user" : "Add user"}</h2></div>
+        <div id="userMessage"></div>
+        <form id="userForm" class="form-grid">
+          <label>Name <input name="name" required /></label>
+          <label>Email <input name="email" type="email" required /></label>
+          <label>Role <select name="role">${options(state.meta.roles.map(role => ({ id: role, name: role })))}</select></label>
+          <label>Password <input name="password" type="password" ${editing ? "" : "required"} /></label>
+          <label>Active <select name="active"><option value="true">Active</option><option value="false">Inactive</option></select></label>
+          <div class="full">
+            <button>${editing ? "Update user" : "Add user"}</button>
+            ${editing ? "<button type=\"button\" class=\"secondary\" id=\"userCancel\">Cancel</button>" : ""}
+          </div>
+        </form>
+      </div>
+    </section>
+  `;
+  document.querySelector("#userForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const body = Object.fromEntries(new FormData(event.target).entries());
+    body.active = body.active === "true";
+    if (!editing && !body.password) {
+      setMessage("#userMessage", "Password is required for new users.", "error");
+      return;
+    }
+    if (editing && !body.password) delete body.password;
+    const path = editing ? `/api/users/${editing}` : "/api/users";
+    const method = editing ? "PUT" : "POST";
+    try {
+      await api(path, { method, body: JSON.stringify(body) });
+      setMessage("#userMessage", editing ? "User updated." : "User created.");
+      state.editing.userId = null;
+      event.target.reset();
+      setTimeout(loadView, 500);
+    } catch (error) {
+      setMessage("#userMessage", error.message, "error");
+    }
+  });
+  const usersTable = document.querySelector("#usersTable");
+  if (usersTable) {
+    usersTable.addEventListener("click", async event => {
+      const action = event.target?.dataset?.action;
+      const id = event.target?.dataset?.id;
+      if (!action || !id) return;
+      if (action === "edit-user") {
+        state.editing.userId = id;
+        renderUsers(state.cache.users);
+        return;
+      }
+      if (action === "delete-user") {
+        if (!confirm("Deactivate this user?")) return;
+        try {
+          await api(`/api/users/${id}`, { method: "DELETE" });
+          setMessage("#userMessage", "User deactivated.");
+          state.editing.userId = null;
+          setTimeout(loadView, 500);
+        } catch (error) {
+          setMessage("#userMessage", error.message, "error");
+        }
+      }
+    });
+  }
+  if (editing) {
+    const current = rows.find(row => row.id === editing);
+    if (current) fillUserForm(current);
+  }
+  const userCancel = document.querySelector("#userCancel");
+  if (userCancel) {
+    userCancel.addEventListener("click", () => {
+      state.editing.userId = null;
+      renderUsers(state.cache.users);
+    });
+  }
+  finishViewTransition();
+}
+
 function renderReports(data) {
   document.querySelector("#content").innerHTML = html`
     <section class="grid stats">
@@ -502,10 +736,13 @@ function options(rows) {
   return rows.map(row => `<option value="${row.id}">${row.name}</option>`).join("");
 }
 
-async function fillMedicineSelect(selector) {
+async function fillMedicineSelect(selector, selectedId = "") {
   const rows = await api("/api/medicines");
   const node = document.querySelector(selector);
-  if (node) node.innerHTML = options(rows);
+  if (node) {
+    node.innerHTML = options(rows);
+    if (selectedId) node.value = selectedId;
+  }
 }
 
 async function fillSupplierSelect(selector) {
@@ -518,11 +755,7 @@ function submitJson(path, messageTarget) {
   return async event => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.target).entries());
-    for (const key of Object.keys(body)) {
-      if (body[key] !== "" && !Number.isNaN(Number(body[key])) && ["mrp", "purchasePrice", "reorderLevel", "quantity"].includes(key)) {
-        body[key] = Number(body[key]);
-      }
-    }
+    coerceNumbers(body, ["mrp", "purchasePrice", "reorderLevel", "quantity"]);
     try {
       await api(path, { method: "POST", body: JSON.stringify(body) });
       setMessage(messageTarget, "Saved successfully.");
@@ -534,4 +767,45 @@ function submitJson(path, messageTarget) {
   };
 }
 
-loadMeta().finally(render);
+function coerceNumbers(body, keys) {
+  for (const key of keys) {
+    if (body[key] !== "" && !Number.isNaN(Number(body[key]))) body[key] = Number(body[key]);
+  }
+}
+
+function fillMedicineForm(row) {
+  const form = document.querySelector("#medicineForm");
+  if (!form) return;
+  form.name.value = row.name || "";
+  form.genericName.value = row.genericName || "";
+  form.brand.value = row.brand || "";
+  form.categoryId.value = row.categoryId || "";
+  form.dosageForm.value = row.dosageForm || "";
+  form.strength.value = row.strength || "";
+  form.mrp.value = row.mrp ?? "";
+  form.purchasePrice.value = row.purchasePrice ?? "";
+  form.reorderLevel.value = row.reorderLevel ?? "";
+  form.manufacturer.value = row.manufacturer || "";
+}
+
+function fillInventoryForm(row) {
+  const form = document.querySelector("#inventoryForm");
+  if (!form) return;
+  form.medicineId.value = row.medicineId || row.medicine?.id || "";
+  form.batchNumber.value = row.batchNumber || "";
+  form.locationId.value = row.locationId || row.location?.id || "";
+  form.quantity.value = row.quantity ?? "";
+  form.expiryDate.value = row.expiryDate ? new Date(row.expiryDate).toISOString().slice(0, 10) : "";
+}
+
+function fillUserForm(row) {
+  const form = document.querySelector("#userForm");
+  if (!form) return;
+  form.name.value = row.name || "";
+  form.email.value = row.email || "";
+  form.role.value = row.role || "";
+  form.password.value = "";
+  form.active.value = row.active ? "true" : "false";
+}
+
+loadMeta().catch(() => logout()).finally(render);

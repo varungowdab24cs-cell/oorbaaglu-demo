@@ -477,6 +477,30 @@ td {
   vertical-align: top;
 }
 
+td.actions {
+  vertical-align: middle;
+  min-width: 160px;
+  width: 160px;
+  text-align: right;
+}
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+}
+
+.row-actions button {
+  white-space: nowrap;
+}
+
+th.actions {
+  text-align: right;
+  min-width: 160px;
+}
+
 th {
   color: var(--muted);
   font-size: 12px;
